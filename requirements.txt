@@ -1,0 +1,5 @@
+streamlit
+upstox-python
+pandas
+plotly
+streamlit-autorefresh
