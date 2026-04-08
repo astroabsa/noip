@@ -23,26 +23,21 @@ def get_upstox_client():
     conf = Configuration()
     conf.access_token = st.secrets["UPSTOX_ACCESS_TOKEN"]
     return ApiClient(conf)
-
 @st.cache_data(ttl=60) 
 def fetch_market_data(symbol="NSE_INDEX|Nifty 50"):
     client = get_upstox_client()
     
     # 1. Fetch Option Chain
-    # We use keyword arguments (instrument_key, expiry_date) to avoid positional errors
+    # Standard: (instrument_key, expiry_date)
     opt_api = OptionsApi(client)
-    chain_res = opt_api.get_put_call_option_chain(
-        instrument_key=symbol, 
-        expiry_date='2026-04-09'
-    ) 
+    chain_res = opt_api.get_put_call_option_chain(symbol, '2026-04-09') 
     
     # 2. Fetch India VIX
-    # We use keyword arguments (instrument_key, interval)
+    # Standard: (symbol, api_version)
+    # Based on your error, it wants 'symbol' and 'api_version'
     quote_api = MarketQuoteApi(client)
-    vix_res = quote_api.get_market_quote_ohlc(
-        instrument_key="NSE_INDEX|India VIX", 
-        interval="1d"
-    )
+    vix_res = quote_api.get_market_quote_ohlc("NSE_INDEX|India VIX", "2.0")
+    
     vix_price = vix_res.data["NSE_INDEX|India VIX"].last_price
 
     return chain_res.data, vix_price
