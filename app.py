@@ -24,22 +24,24 @@ def get_upstox_client():
     conf.access_token = st.secrets["UPSTOX_ACCESS_TOKEN"]
     return ApiClient(conf)
 
-@st.cache_data(ttl=60) # Cache for 1 minute to stay within API limits
+@st.cache_data(ttl=60) 
 def fetch_market_data(symbol="NSE_INDEX|Nifty 50"):
     client = get_upstox_client()
+    api_version = "2.0" # Required by Upstox SDK
     
     # 1. Fetch Option Chain
     opt_api = OptionsApi(client)
-    # Note: You should update this expiry date to the current active one
-    chain_res = opt_api.get_put_call_option_chain(symbol, '2026-04-09') 
+    # Corrected: Added api_version as the 3rd argument
+    chain_res = opt_api.get_put_call_option_chain(symbol, '2026-04-09', api_version) 
     
-    # 2. Fetch India VIX (using Market Quote API)
+    # 2. Fetch India VIX
     quote_api = MarketQuoteApi(client)
-    vix_res = quote_api.get_market_quote_ohlc("NSE_INDEX|India VIX", "v2")
+    # Corrected: Added api_version as the 2nd argument and interval as 3rd
+    vix_res = quote_api.get_market_quote_ohlc("NSE_INDEX|India VIX", api_version, "1d")
     vix_price = vix_res.data["NSE_INDEX|India VIX"].last_price
 
     return chain_res.data, vix_price
-
+    
 # --- 3. THE ANALYSIS PILLARS ---
 def process_pillars(data, vix):
     df = pd.DataFrame([vars(s) for s in data])
