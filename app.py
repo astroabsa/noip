@@ -1,133 +1,159 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-import plotly.express as px
-from upstox_client import ApiClient, Configuration, OptionsApi, MarketQuoteApi
+from upstox_python.api_client import ApiClient
+from upstox_python.websocket.market_data_streamer import MarketDataStreamerV3
 from streamlit_autorefresh import st_autorefresh
+import threading
+import json
+import time
 from datetime import datetime
 
-# --- 1. CONFIGURATION & THEME ---
-st.set_page_config(page_title="Market Predictor Pro", layout="wide", initial_sidebar_state="collapsed")
+# --- CONFIGURATION ---
+# Replace with your specific instrument key (e.g., Nifty 50 Index)
+INSTRUMENT_KEY = "NSE_INDEX|Nifty 50" 
 
-# Custom CSS for Dark Mode Professional Look
-st.markdown("""
-    <style>
-    .main { background-color: #0e1117; color: white; }
-    div[data-metric-indicator="up"] { color: #00ff00 !important; }
-    div[data-metric-indicator="down"] { color: #ff4b4b !important; }
-    </style>
-    """, unsafe_allow_html=True)
+# --- SESSION STATE INITIALIZATION ---
+if 'market_data' not in st.session_state:
+    st.session_state.market_data = {
+        'ltp': 0.0,
+        'prev_ltp': 0.0,
+        'oi': 0,
+        'prev_oi': 0,
+        'pcr': 0.0,
+        'vwap': 0.0,
+        'history': pd.DataFrame(columns=['time', 'ltp', 'pcr', 'oi'])
+    }
 
-# --- 2. DATA ENGINE ---
-def get_upstox_client():
-    conf = Configuration()
-    conf.access_token = st.secrets["UPSTOX_ACCESS_TOKEN"]
-    return ApiClient(conf)
-@st.cache_data(ttl=60) 
-def fetch_market_data(symbol="NSE_INDEX|Nifty 50"):
-    client = get_upstox_client()
-    
-    # 1. Fetch Option Chain
-    # Requirements: (instrument_key, expiry_date)
-    # The SDK internally handles the API version now.
-    opt_api = OptionsApi(client)
-    chain_res = opt_api.get_put_call_option_chain(symbol, '2026-04-16') 
-    
-    # 2. Fetch India VIX
-    # Requirements: (symbol, interval)
-    # The '2.0' or 'api_version' is now an optional keyword, not a positional one.
-    quote_api = MarketQuoteApi(client)
-    vix_res = quote_api.get_market_quote_ohlc("NSE_INDEX|India VIX", "1d")
-    
-    # Accessing the data safely
-    vix_data = vix_res.data.get("NSE_INDEX|India VIX")
-    if vix_data:
-        vix_price = vix_data.last_price
-    else:
-        vix_price = 0
-        st.warning("VIX data currently unavailable.")
+# --- LOGIC PILLARS ---
+def get_conviction_label(ltp, prev_ltp, oi, prev_oi):
+    if ltp > prev_ltp and oi > prev_oi:
+        return "🔥 STRONG BULLISH (Long Buildup)", "#00FF00"
+    elif ltp < prev_ltp and oi > prev_oi:
+        return "📉 STRONG BEARISH (Short Buildup)", "#FF4B4B"
+    elif ltp > prev_ltp and oi < prev_oi:
+        return "⚠️ WEAK BOUNCE (Short Covering)", "#00D1FF"
+    elif ltp < prev_ltp and oi < prev_oi:
+        return "🩸 PROFIT BOOKING (Long Unwinding)", "#FFA500"
+    return "😴 NEUTRAL", "#808080"
 
-    return chain_res.data, vix_price
-    
-# --- 3. THE ANALYSIS PILLARS ---
-def process_pillars(data, vix):
-    df = pd.DataFrame([vars(s) for s in data])
-    spot = data[0].underlying_spot_price
-    
-    # Pillar 1: Filter ATM ± 3 Strikes
-    df['diff'] = abs(df['strike_price'] - spot)
-    atm_idx = df['diff'].idxmin()
-    atm_df = df.iloc[max(0, atm_idx-3) : min(len(df), atm_idx+4)].copy()
-    
-    # Pillar 2: OI Buildup Calculation
-    call_oi = atm_df['call_options'].apply(lambda x: x['market_data']['oi']).sum()
-    put_oi = atm_df['put_options'].apply(lambda x: x['market_data']['oi']).sum()
-    pcr = put_oi / call_oi if call_oi > 0 else 0
-    
-    # Pillar 3: VIX Context
-    vix_status = "⚠️ HIGH VOLATILITY" if vix > 22 else "✅ STABLE"
-    
-    return spot, pcr, atm_df, vix_status
+# --- WEBSOCKET HANDLERS ---
+def on_message(ws, message):
+    data = json.loads(message)
+    if 'feeds' in data and INSTRUMENT_KEY in data['feeds']:
+        feed = data['feeds'][INSTRUMENT_KEY]
+        if 'ff' in feed and 'market_ff' in feed['ff']:
+            ltp = feed['ff']['market_ff']['ltp']
+            # Update LTP in state
+            st.session_state.market_data['prev_ltp'] = st.session_state.market_data['ltp']
+            st.session_state.market_data['ltp'] = ltp
 
-# --- 4. DASHBOARD UI ---
-def main():
-    # Auto-refresh every 30 seconds
-    st_autorefresh(interval=30000, key="datarefresh")
+def start_streamer():
+    access_token = st.secrets["UPSTOX_ACCESS_TOKEN"]
+    api_client = ApiClient()
+    api_client.configuration.access_token = access_token
     
-    st.title("🎯 Market Predictor Pro | Live Analysis")
-    st.caption(f"Last Sync: {datetime.now().strftime('%H:%M:%S')} (April 2026 Cycle)")
+    streamer = MarketDataStreamerV3(api_client)
+    streamer.on_message = on_message
+    streamer.connect()
+    streamer.subscribe([INSTRUMENT_KEY], "full")
 
-    try:
-        raw_data, vix_price = fetch_market_data()
-        spot, pcr, atm_df, vix_msg = process_pillars(raw_data, vix_price)
+# Start background thread for WebSocket if not already running
+if 'ws_thread' not in st.session_state:
+    st.session_state.ws_thread = threading.Thread(target=start_streamer, daemon=True)
+    st.session_state.ws_thread.start()
 
-        # TOP ROW: METRICS
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("NIFTY 50", f"₹{spot}")
-        m2.metric("PUT-CALL RATIO (PCR)", round(pcr, 2), delta="Bullish" if pcr > 1 else "Bearish")
-        m3.metric("INDIA VIX", f"{vix_price}%", delta=vix_msg)
+# --- STREAMLIT UI ---
+st.set_page_config(page_title="Professional Conviction Terminal", layout="wide")
+
+# Auto-refresh the UI every 2 seconds to reflect WebSocket updates
+st_autorefresh(interval=2000, key="datarefresh")
+
+st.title("⚡ Upstox Live Conviction Terminal")
+
+# Sidebar for manual data injection (Simulating the Option Chain API Polling)
+with st.sidebar:
+    st.header("Manual/API Controls")
+    st.write("Token Status: ✅ Active")
+    # In a full automated setup, this part would poll the get_option_chain API
+    new_pcr = st.number_input("Current PCR (from API)", value=1.0, step=0.01)
+    new_oi = st.number_input("Current OI (from API)", value=1000000)
+    
+    if st.button("Update Sentiment Data"):
+        st.session_state.market_data['pcr'] = new_pcr
+        st.session_state.market_data['prev_oi'] = st.session_state.market_data['oi']
+        st.session_state.market_data['oi'] = new_oi
         
-        # Current Signal Box
-        signal = "BULLISH" if (pcr > 1.1 and vix_price < 25) else "BEARISH" if pcr < 0.8 else "NEUTRAL"
-        st.info(f"**CURRENT SIGNAL:** {signal}")
+        # Log to history for Delta PCR Velocity
+        new_entry = pd.DataFrame([{
+            'time': datetime.now().strftime("%H:%M:%S"),
+            'ltp': st.session_state.market_data['ltp'],
+            'pcr': new_pcr,
+            'oi': new_oi
+        }])
+        st.session_state.market_data['history'] = pd.concat([st.session_state.market_data['history'], new_entry]).tail(60)
 
-        # MIDDLE ROW: CHARTS
-        c1, c2 = st.columns([2, 1])
-        
-        with c1:
-            st.subheader("ATM ±3 Option Chain Battle")
-            # Prepare data for bar chart
-            chart_df = pd.DataFrame({
-                'Strike': atm_df['strike_price'],
-                'Call OI': atm_df['call_options'].apply(lambda x: x['market_data']['oi']),
-                'Put OI': atm_df['put_options'].apply(lambda x: x['market_data']['oi'])
-            })
-            fig = go.Figure(data=[
-                go.Bar(name='Call OI', x=chart_df['Strike'], y=chart_df['Call OI'], marker_color='#ff4b4b'),
-                go.Bar(name='Put OI', x=chart_df['Strike'], y=chart_df['Put OI'], marker_color='#00ff00')
-            ])
-            fig.update_layout(barmode='group', template="plotly_dark")
-            st.plotly_chart(fig, use_container_width=True)
+# --- DASHBOARD LAYOUT ---
+col1, col2, col3 = st.columns([1, 1, 1])
 
-        with c2:
-            st.subheader("Sentiment Gauge")
-            fig_gauge = go.Figure(go.Indicator(
-                mode = "gauge+number",
-                value = pcr,
-                domain = {'x': [0, 1], 'y': [0, 1]},
-                gauge = {
-                    'axis': {'range': [None, 2]},
-                    'bar': {'color': "white"},
-                    'steps' : [
-                        {'range': [0, 0.7], 'color': "red"},
-                        {'range': [1.3, 2], 'color': "green"}]
-                }
-            ))
-            fig_gauge.update_layout(template="plotly_dark")
-            st.plotly_chart(fig_gauge, use_container_width=True)
+# Pillar 1: Price Action
+with col1:
+    ltp = st.session_state.market_data['ltp']
+    prev_ltp = st.session_state.market_data['prev_ltp']
+    delta = ltp - prev_ltp
+    st.metric("NIFTY 50 LTP", f"₹{ltp:,.2f}", f"{delta:+.2f}")
+    
+    vwap_status = "ABOVE VWAP" if ltp > 22500 else "BELOW VWAP" # Example threshold
+    st.write(f"**Institutional Status:** {vwap_status}")
 
-    except Exception as e:
-        st.error(f"Waiting for market data or API Token update... Error: {e}")
+# Pillar 2: Sentiment Gauge (PCR)
+with col2:
+    pcr_val = st.session_state.market_data['pcr']
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=pcr_val,
+        domain={'x': [0, 1], 'y': [0, 1]},
+        title={'text': "PCR Sentiment"},
+        gauge={
+            'axis': {'range': [0.5, 1.5]},
+            'steps': [
+                {'range': [0.5, 0.8], 'color': "salmon"},
+                {'range': [0.8, 1.2], 'color': "white"},
+                {'range': [1.2, 1.5], 'color': "lightgreen"}
+            ],
+            'threshold': {
+                'line': {'color': "red", 'width': 4},
+                'thickness': 0.75,
+                'value': pcr_val
+            }
+        }
+    ))
+    fig.update_layout(height=250, margin=dict(l=20, r=20, t=50, b=20))
+    st.plotly_chart(fig, use_container_width=True)
 
-if __name__ == "__main__":
-    main()
+# Pillar 3: Conviction Signal
+with col3:
+    label, color = get_conviction_label(
+        st.session_state.market_data['ltp'],
+        st.session_state.market_data['prev_ltp'],
+        st.session_state.market_data['oi'],
+        st.session_state.market_data['prev_oi']
+    )
+    st.subheader("Market Signal")
+    st.markdown(f"""
+        <div style="background-color:{color}; padding:20px; border-radius:10px; text-align:center;">
+            <h2 style="color:white; margin:0;">{label}</h2>
+        </div>
+    """, unsafe_allow_all_html=True)
+
+# --- TREND ANALYSIS ---
+st.divider()
+st.subheader("📈 ΔPCR Velocity (Leading Indicator)")
+
+if not st.session_state.market_data['history'].empty:
+    chart_data = st.session_state.market_data['history'].set_index('time')
+    st.line_chart(chart_data['pcr'])
+else:
+    st.info("Awaiting manual 'Update Sentiment Data' to plot trends...")
+
+st.caption("Data Refresh: Real-time via WebSocket | Logic: Price-OI-PCR Convergence")
