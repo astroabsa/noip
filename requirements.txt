@@ -1,5 +1,5 @@
 streamlit
-upstox-python
+upstox-python-sdk
 pandas
 plotly
 streamlit-autorefresh
