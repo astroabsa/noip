@@ -23,28 +23,29 @@ def get_upstox_client():
     conf = Configuration()
     conf.access_token = st.secrets["UPSTOX_ACCESS_TOKEN"]
     return ApiClient(conf)
-
 @st.cache_data(ttl=60) 
 def fetch_market_data(symbol="NSE_INDEX|Nifty 50"):
     client = get_upstox_client()
-    api_v = "2.0" # Explicitly defining the version
     
     # 1. Fetch Option Chain
-    # We pass the version as the 3rd argument
+    # Requirements: (instrument_key, expiry_date)
+    # The SDK internally handles the API version now.
     opt_api = OptionsApi(client)
-    chain_res = opt_api.get_put_call_option_chain(symbol, '2026-04-16', api_v) 
+    chain_res = opt_api.get_put_call_option_chain(symbol, '2026-04-16') 
     
     # 2. Fetch India VIX
-    # Based on the error, it needs: (symbol, api_version, interval)
+    # Requirements: (symbol, interval)
+    # The '2.0' or 'api_version' is now an optional keyword, not a positional one.
     quote_api = MarketQuoteApi(client)
-    vix_res = quote_api.get_market_quote_ohlc("NSE_INDEX|India VIX", api_v, "1d")
+    vix_res = quote_api.get_market_quote_ohlc("NSE_INDEX|India VIX", "1d")
     
-    # Verify data exists before accessing
-    if not vix_res.data:
-        st.error("VIX data not found in API response.")
-        return chain_res.data, 0
-        
-    vix_price = vix_res.data["NSE_INDEX|India VIX"].last_price
+    # Accessing the data safely
+    vix_data = vix_res.data.get("NSE_INDEX|India VIX")
+    if vix_data:
+        vix_price = vix_data.last_price
+    else:
+        vix_price = 0
+        st.warning("VIX data currently unavailable.")
 
     return chain_res.data, vix_price
     
